@@ -13,7 +13,7 @@ def warper(img, src, dst):
     return warped
 
 
-def draw_2_images(left_image, right_image, left_image_title=None, right_image_title=None):
+def draw_2_images(left_image, right_image, left_image_title=None, right_image_title=None, right_gray=False):
     f, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
     f.tight_layout()
     if left_image_title:
@@ -22,9 +22,23 @@ def draw_2_images(left_image, right_image, left_image_title=None, right_image_ti
     ax1.axis('off')
     if right_image_title:
         ax2.set_title(right_image_title)
-    ax2.imshow(right_image)
+    if right_gray:
+        ax2.imshow(right_image, cmap='gray')
+    else:
+        ax2.imshow(right_image)
     ax2.axis('off')
     plt.subplots_adjust(left=0., right=1, top=0.9, bottom=0)
+
+
+def draw_image(image, title=None, gray=False):
+    plt.figure(figsize=(10, 10))
+    if gray:
+        plt.imshow(image, cmap='gray')
+    else:
+        plt.imshow(image)
+    if title:
+        plt.title(title)
+    plt.show()
 
 
 def draw_images(images, titles, columns=4):
@@ -77,15 +91,50 @@ class Distortion(object):
 
 class PerspectiveTransformer(object):
     def __init__(self):
-        self.src = np.float32([[580, 464], [709, 464], [1043, 680], [263, 680]])
+        self.src = np.float32([[583, 458], [700, 458], [1030, 672], [276, 672]])
 
     def transform(self, image):
         image_size = (image.shape[1], image.shape[0])
         dst = np.float32([[image_size[0] * 0.2, image_size[1] * 0.1], [image_size[0] * 0.8, image_size[1] * 0.1],
-                          [image_size[0] * 0.8, image_size[1] * 0.95], [image_size[0] * 0.2, image_size[1] * 0.95]])
+                          [image_size[0] * 0.8, image_size[1] * 1], [image_size[0] * 0.2, image_size[1] * 1]])
 
         self.M = cv2.getPerspectiveTransform(self.src, dst)
         self.M_r = cv2.getPerspectiveTransform(dst, self.src)
         warped = cv2.warpPerspective(image, self.M, image_size, flags=cv2.INTER_LINEAR)
 
         return warped
+
+
+class ThresholdBinary(object):
+    def __init__(self, sobelx_thresh=(20, 100), saturation_thresh=(170, 255)):
+        self.sobelx_thresh = sobelx_thresh
+        self.saturation_thresh = saturation_thresh
+
+    def zeros(self, image):
+        return np.zeros((image.shape[0], image.shape[1]))
+
+    def saturation_threshold(self, image):
+        hls = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
+        s_channel = hls[:, :, 2]
+
+        binary_output = np.zeros_like(s_channel)
+        binary_output[(s_channel >= self.saturation_thresh[0]) & (s_channel <= self.saturation_thresh[1])] = 1
+        return binary_output
+
+    def gray_threshold(self, image):
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0)
+        abs_sobelx = np.absolute(sobelx)
+        scaled_sobel = np.uint8(255.0 * abs_sobelx / np.max(abs_sobelx))
+
+        sxbinary = np.zeros_like(scaled_sobel)
+        sxbinary[(scaled_sobel >= self.sobelx_thresh[0]) & (scaled_sobel <= self.sobelx_thresh[1])] = 1
+        return sxbinary
+
+    def combined_threshold(self, image):
+        s_channel_binary = self.saturation_threshold(image)
+        sobelx_binary = self.gray_threshold(image)
+
+        binary = np.zeros_like(s_channel_binary)
+        binary[(s_channel_binary == 1) | (sobelx_binary == 1)] = 1
+        return binary
