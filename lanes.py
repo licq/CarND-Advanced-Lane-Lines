@@ -1,4 +1,5 @@
 import cv2
+import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -18,10 +19,11 @@ def draw_2_images(left_image, right_image, left_image_title=None, right_image_ti
     if left_image_title:
         ax1.set_title(left_image_title)
     ax1.imshow(left_image)
+    ax1.axis('off')
     if right_image_title:
         ax2.set_title(right_image_title)
     ax2.imshow(right_image)
-    plt.axis('off')
+    ax2.axis('off')
     plt.subplots_adjust(left=0., right=1, top=0.9, bottom=0)
 
 
@@ -37,7 +39,7 @@ def draw_images(images, titles, columns=4):
 
 
 def write_image(filename, image):
-    cv2.imwrite(filename, image)
+    mpimg.imsave(filename, image)
 
 
 class Distortion(object):
@@ -48,7 +50,7 @@ class Distortion(object):
 
     def train(self, images):
         for img in images:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             ret, corners = cv2.findChessboardCorners(gray, self.pattern_size, None)
 
             if ret:
@@ -62,7 +64,7 @@ class Distortion(object):
 
     def draw_chessboard(self, image):
         copy = np.copy(image)
-        gray = cv2.cvtColor(copy, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(copy, cv2.COLOR_RGB2GRAY)
         ret, corners = cv2.findChessboardCorners(gray, self.pattern_size, None)
         cv2.drawChessboardCorners(copy, self.pattern_size, corners, ret)
         return copy
@@ -71,3 +73,19 @@ class Distortion(object):
         image_size = (image.shape[1], image.shape[0])
         ret, mtx, dist, _, _ = cv2.calibrateCamera(self.obj_points, self.img_points, image_size, None, None)
         return cv2.undistort(image, mtx, dist, None, mtx)
+
+
+class PerspectiveTransformer(object):
+    def __init__(self):
+        self.src = np.float32([[580, 464], [709, 464], [1043, 680], [263, 680]])
+
+    def transform(self, image):
+        image_size = (image.shape[1], image.shape[0])
+        dst = np.float32([[image_size[0] * 0.2, image_size[1] * 0.1], [image_size[0] * 0.8, image_size[1] * 0.1],
+                          [image_size[0] * 0.8, image_size[1] * 0.95], [image_size[0] * 0.2, image_size[1] * 0.95]])
+
+        self.M = cv2.getPerspectiveTransform(self.src, dst)
+        self.M_r = cv2.getPerspectiveTransform(dst, self.src)
+        warped = cv2.warpPerspective(image, self.M, image_size, flags=cv2.INTER_LINEAR)
+
+        return warped
