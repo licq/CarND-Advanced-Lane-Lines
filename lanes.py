@@ -2,6 +2,7 @@ import cv2
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import deque
 
 
 def draw_2_images(left_image, right_image, left_image_title=None, right_image_title=None, right_gray=False):
@@ -101,37 +102,41 @@ class PerspectiveTransformer(object):
 
 
 class ThresholdBinary(object):
-    def __init__(self, sobelx_thresh=(20, 100), saturation_thresh=(170, 255)):
-        self.sobelx_thresh = sobelx_thresh
-        self.saturation_thresh = saturation_thresh
-
     def zeros(self, image):
         return np.zeros((image.shape[0], image.shape[1]))
 
-    def saturation_threshold(self, image):
+    def hls_threshold(self, image, channel, thresh=(0, 255)):
         hls = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
-        s_channel = hls[:, :, 2]
+        if channel == 'l':
+            s_channel = hls[:, :, 1]
+        else:
+            s_channel = hls[:, :, 2]
 
         binary_output = np.zeros_like(s_channel)
-        binary_output[(s_channel >= self.saturation_thresh[0]) & (s_channel <= self.saturation_thresh[1])] = 1
+        binary_output[(s_channel >= thresh[0]) & (s_channel <= thresh[1])] = 1
         return binary_output
 
-    def gray_threshold(self, image):
+    def gray_threshold(self, image, orient='x', thresh=(0, 255)):
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0)
+        if orient == 'x':
+            sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0)
+        else:
+            sobelx = cv2.Sobel(gray, cv2.CV_64F, 0, 1)
         abs_sobelx = np.absolute(sobelx)
         scaled_sobel = np.uint8(255.0 * abs_sobelx / np.max(abs_sobelx))
 
         sxbinary = np.zeros_like(scaled_sobel)
-        sxbinary[(scaled_sobel >= self.sobelx_thresh[0]) & (scaled_sobel <= self.sobelx_thresh[1])] = 1
+        sxbinary[(scaled_sobel >= thresh[0]) & (scaled_sobel <= thresh[1])] = 1
         return sxbinary
 
     def combined_threshold(self, image):
-        s_channel_binary = self.saturation_threshold(image)
-        sobelx_binary = self.gray_threshold(image)
+        gradx = self.gray_threshold(image, orient='x', thresh=(20, 255))
+        grady = self.gray_threshold(image, orient='y', thresh=(25, 100))
+        hls_s_binary = self.hls_threshold(image, 's', thresh=(120, 255))
+        hls_l_binary = self.hls_threshold(image, 'l', thresh=(50, 255))
 
-        binary = np.zeros_like(s_channel_binary)
-        binary[(s_channel_binary == 1) | (sobelx_binary == 1)] = 1
+        binary = np.zeros_like(gradx)
+        binary[((gradx == 1) & (grady == 1)) | ((hls_l_binary == 1) & (hls_s_binary == 1))] = 1
         return binary
 
 
@@ -140,38 +145,31 @@ class PolynomialFinder(object):
         self.n_windows = 9
         self.margin = 100
         self.min_pixels = 50
-        self.left_fit = None
-        self.right_fit = None
 
-    def find(self, image):
-        self.left_fit, _ = self.update_fit(self.left_fit, image) if self.left_fit is not None \
-            else self.refind_fit(image, self.find_left_base(image))
-        self.right_fit, _ = self.update_fit(self.right_fit, image) if self.right_fit is not None \
-            else self.refind_fit(image, self.find_right_base(image))
+    def find(self, image, left_line, right_line):
+        self.update_fit(image, left_line) if left_line.detected else self.refind_fit(image, self.find_left_base(image),
+                                                                                     left_line)
+        self.update_fit(image, right_line) if right_line.detected else self.refind_fit(image,
+                                                                                       self.find_right_base(image),
+                                                                                       right_line)
 
-        return self.left_fit, self.right_fit
-
-    def find_and_draw(self, image):
-        self.left_fit, left_lane_indexes = self.update_fit(self.left_fit, image) if self.left_fit is not None \
-            else self.refind_fit(image, self.find_left_base(image))
-        self.right_fit, right_lane_indexes = self.update_fit(self.right_fit, image) if self.right_fit is not None \
-            else self.refind_fit(image, self.find_right_base(image))
-
-        nonzero = image.nonzero()
-        nonzeroy, nonzerox = np.array(nonzero[0]), np.array(nonzero[1])
+    def find_and_draw(self, image, left_line, right_line):
+        self.update_fit(image, left_line) if left_line.detected else self.refind_fit(image, self.find_left_base(image),
+                                                                                     left_line)
+        self.update_fit(image, right_line) if right_line.detected else self.refind_fit(image,
+                                                                                       self.find_right_base(image),
+                                                                                       right_line)
 
         out_img = np.dstack((image, image, image)) * 255
-        out_img[nonzeroy[left_lane_indexes], nonzerox[left_lane_indexes]] = [255, 0, 0]
-        out_img[nonzeroy[right_lane_indexes], nonzerox[right_lane_indexes]] = [0, 0, 255]
+        out_img[left_line.ally, left_line.allx] = [255, 0, 0]
+        out_img[right_line.ally, right_line.allx] = [0, 0, 255]
 
-        ploty = np.linspace(0, image.shape[0] - 1, image.shape[0])
-        left_fitx = self.left_fit[0] * ploty ** 2 + self.left_fit[1] * ploty + self.left_fit[2]
-        right_fitx = self.right_fit[0] * ploty ** 2 + self.right_fit[1] * ploty + self.right_fit[2]
-        result = cv2.addWeighted(out_img, 1, self.make_window_img(out_img, ploty, left_fitx, right_fitx), 0.3, 0)
+        result = cv2.addWeighted(out_img, 1, self.make_window_img(out_img, left_line.fit_y, left_line.bestx,
+                                                                  right_line.bestx), 0.3, 0)
         plt.figure(figsize=(16, 8))
         plt.imshow(result)
-        plt.plot(left_fitx, ploty, color='yellow')
-        plt.plot(right_fitx, ploty, color='yellow')
+        plt.plot(left_line.bestx, left_line.fit_y, color='yellow')
+        plt.plot(right_line.bestx, right_line.fit_y, color='yellow')
         plt.xlim(0, 1280)
         plt.ylim(720, 0)
 
@@ -190,18 +188,25 @@ class PolynomialFinder(object):
 
         return window_img
 
-    def update_fit(self, fit, image):
+    def update_fit(self, image, line):
         nonzero = image.nonzero()
         nonzeroy, nonzerox = np.array(nonzero[0]), np.array(nonzero[1])
 
+        fit = line.best_fit
         lane_indexes = ((nonzerox > (fit[0] * nonzeroy ** 2 + fit[1] * nonzeroy + fit[2] - self.margin)) & (
             nonzerox < (fit[0] * nonzeroy ** 2 + fit[1] * nonzeroy + fit[2] + self.margin)))
         x = nonzerox[lane_indexes]
         y = nonzeroy[lane_indexes]
 
-        return np.polyfit(y, x, 2), lane_indexes
+        self.update_line(line, image, x, y)
 
-    def refind_fit(self, image, current):
+    def update_line(self, line, image, x, y):
+        new_fit = np.polyfit(y, x, 2)
+        ploty = np.linspace(0, image.shape[0] - 1, image.shape[0])
+        fitx = new_fit[0] * ploty ** 2 + new_fit[1] * ploty + new_fit[2]
+        line.update(True, new_fit, fitx, x, y, ploty)
+
+    def refind_fit(self, image, current, line):
         nonzero = image.nonzero()
         nonzeroy, nonzerox = np.array(nonzero[0]), np.array(nonzero[1])
 
@@ -223,7 +228,7 @@ class PolynomialFinder(object):
         x = nonzerox[lane_indexes]
         y = nonzeroy[lane_indexes]
 
-        return np.polyfit(y, x, 2), lane_indexes
+        self.update_line(line, image, x, y)
 
     @staticmethod
     def find_left_base(image):
@@ -242,14 +247,54 @@ class PolynomialFinder(object):
         return right_base
 
 
+class Line(object):
+    def __init__(self, n=5):
+        self.detected = False
+        self.recent_xfitted = deque([], maxlen=n)
+        self.bestx = None
+        self.best_fit = None
+        self.current_fit = [np.array([False])]
+        self.radius_of_curvature = None
+        self.line_base_pos = None
+        self.diffs = np.array([0, 0, 0], dtype='float')
+        self.allx = None
+        self.ally = None
+        self.fit_y = None
+
+    def calculate_curvature(self):
+        ym_per_pixel = 30 / 720
+        xm_per_pixel = 3.7 / 700
+
+        y_eval = np.max(self.fit_y)
+        fit_cr = np.polyfit(self.fit_y * ym_per_pixel, self.bestx * xm_per_pixel, 2)
+        self.radius_of_curvature = ((1 + (2 * fit_cr[0] * y_eval * ym_per_pixel + fit_cr[1]) ** 2) ** 1.5) / \
+                                   np.absolute(2 * fit_cr[0])
+
+        self.line_base_pos = self.bestx[-1] * xm_per_pixel
+
+    def update(self, detected, current_fit, fitx, x, y, fit_y):
+        self.detected = detected
+        self.recent_xfitted.appendleft(fitx)
+        self.bestx = np.mean(self.recent_xfitted, axis=0)
+        self.current_fit = current_fit
+        self.allx = x
+        self.ally = y
+        self.fit_y = fit_y
+        self.calculate_curvature()
+        self.best_fit = np.polyfit(self.fit_y, self.bestx, 2)
+
+    def last_fitx(self):
+        return self.recent_xfitted[-1]
+
+
 class Pipeline(object):
     def __init__(self):
         self.distortion = Distortion((9, 6))
         self.transformer = PerspectiveTransformer()
         self.binary = ThresholdBinary()
         self.finder = PolynomialFinder()
-        self.ym_per_pixel = 30 / 720
-        self.xm_per_pixel = 3.7 / 700
+        self.left_line = Line()
+        self.right_line = Line()
 
     def calibrate_camera(self, images):
         self.distortion.train(images)
@@ -258,33 +303,29 @@ class Pipeline(object):
         undistorted = self.distortion.undistort(image)
         binary = self.binary.combined_threshold(undistorted)
         warped = self.transformer.transform(binary)
-        left_fit, right_fit = self.finder.find(warped)
-
-        ploty = np.linspace(0, image.shape[0] - 1, image.shape[0])
-        left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
-        right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
+        self.finder.find(warped, self.left_line, self.right_line)
 
         warped_zero = np.zeros_like(warped).astype(np.uint8)
         color_warp = np.dstack((warped_zero, warped_zero, warped_zero))
 
-        pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+        pts_left = np.array([np.transpose(np.vstack([self.left_line.bestx, self.left_line.fit_y]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([self.right_line.bestx, self.right_line.fit_y])))])
         pts = np.hstack((pts_left, pts_right))
         cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
 
         newwarp = self.transformer.reverse_transform(color_warp)
         result = cv2.addWeighted(undistorted, 1, newwarp, 0.3, 0)
 
-        y_eval = np.max(ploty)
-        left_fit_cr = np.polyfit(ploty * self.ym_per_pixel, left_fitx * self.xm_per_pixel, 2)
-        right_fit_cr = np.polyfit(ploty * self.ym_per_pixel, right_fitx * self.xm_per_pixel, 2)
-        left_curverad = ((1 + (
-            2 * left_fit_cr[0] * y_eval * self.ym_per_pixel + left_fit_cr[1]) ** 2) ** 1.5) / np.absolute(
-            2 * left_fit_cr[0])
-        right_curverad = ((1 + (
-            2 * right_fit_cr[0] * y_eval * self.ym_per_pixel + right_fit_cr[1]) ** 2) ** 1.5) / np.absolute(
-            2 * right_fit_cr[0])
-        cv2.putText(result, 'Radius of Curvature = ' + str(round((left_curverad + right_curverad) / 2, 3)) + '(m)',
+        cv2.putText(result, 'Radius of Curvature = ' + str(
+            round((self.left_line.radius_of_curvature + self.right_line.radius_of_curvature) / 2, 3)) + '(m)',
                     (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        center = (self.right_line.line_base_pos - self.left_line.line_base_pos) / 2 + self.left_line.line_base_pos
+        center_left = 640 * 3.7 / 700 - center
+        if center_left > 0:
+            text = "{:.2f}m left of center".format(center_left)
+        else:
+            text = "{:.2f}m right of center".format(-center_left)
+        cv2.putText(result, text, (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
         return result
