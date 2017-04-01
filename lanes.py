@@ -4,15 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def warper(img, src, dst):
-    # Compute and apply perpective transform
-    img_size = (img.shape[1], img.shape[0])
-    M = cv2.getPerspectiveTransform(src, dst)
-    warped = cv2.warpPerspective(img, M, img_size, flags=cv2.INTER_NEAREST)  # keep same size as input image
-
-    return warped
-
-
 def draw_2_images(left_image, right_image, left_image_title=None, right_image_title=None, right_gray=False):
     f, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
     f.tight_layout()
@@ -31,13 +22,14 @@ def draw_2_images(left_image, right_image, left_image_title=None, right_image_ti
 
 
 def draw_image(image, title=None, gray=False):
-    plt.figure(figsize=(10, 10))
+    plt.figure(figsize=(16, 8))
     if gray:
         plt.imshow(image, cmap='gray')
     else:
         plt.imshow(image)
     if title:
         plt.title(title)
+    plt.axis('off')
     plt.show()
 
 
@@ -104,6 +96,9 @@ class PerspectiveTransformer(object):
 
         return warped
 
+    def reverse_transform(self, image):
+        return cv2.warpPerspective(image, self.M_r, (image.shape[1], image.shape[0]))
+
 
 class ThresholdBinary(object):
     def __init__(self, sobelx_thresh=(20, 100), saturation_thresh=(170, 255)):
@@ -138,3 +133,158 @@ class ThresholdBinary(object):
         binary = np.zeros_like(s_channel_binary)
         binary[(s_channel_binary == 1) | (sobelx_binary == 1)] = 1
         return binary
+
+
+class PolynomialFinder(object):
+    def __init__(self):
+        self.n_windows = 9
+        self.margin = 100
+        self.min_pixels = 50
+        self.left_fit = None
+        self.right_fit = None
+
+    def find(self, image):
+        self.left_fit, _ = self.update_fit(self.left_fit, image) if self.left_fit is not None \
+            else self.refind_fit(image, self.find_left_base(image))
+        self.right_fit, _ = self.update_fit(self.right_fit, image) if self.right_fit is not None \
+            else self.refind_fit(image, self.find_right_base(image))
+
+        return self.left_fit, self.right_fit
+
+    def find_and_draw(self, image):
+        self.left_fit, left_lane_indexes = self.update_fit(self.left_fit, image) if self.left_fit is not None \
+            else self.refind_fit(image, self.find_left_base(image))
+        self.right_fit, right_lane_indexes = self.update_fit(self.right_fit, image) if self.right_fit is not None \
+            else self.refind_fit(image, self.find_right_base(image))
+
+        nonzero = image.nonzero()
+        nonzeroy, nonzerox = np.array(nonzero[0]), np.array(nonzero[1])
+
+        out_img = np.dstack((image, image, image)) * 255
+        out_img[nonzeroy[left_lane_indexes], nonzerox[left_lane_indexes]] = [255, 0, 0]
+        out_img[nonzeroy[right_lane_indexes], nonzerox[right_lane_indexes]] = [0, 0, 255]
+
+        ploty = np.linspace(0, image.shape[0] - 1, image.shape[0])
+        left_fitx = self.left_fit[0] * ploty ** 2 + self.left_fit[1] * ploty + self.left_fit[2]
+        right_fitx = self.right_fit[0] * ploty ** 2 + self.right_fit[1] * ploty + self.right_fit[2]
+        result = cv2.addWeighted(out_img, 1, self.make_window_img(out_img, ploty, left_fitx, right_fitx), 0.3, 0)
+        plt.figure(figsize=(16, 8))
+        plt.imshow(result)
+        plt.plot(left_fitx, ploty, color='yellow')
+        plt.plot(right_fitx, ploty, color='yellow')
+        plt.xlim(0, 1280)
+        plt.ylim(720, 0)
+
+    def make_window_img(self, image, ploty, left_fitx, right_fitx):
+        window_img = np.zeros_like(image)
+        left_line_window1 = np.array([np.transpose(np.vstack([left_fitx - self.margin, ploty]))])
+        left_line_window2 = np.array([np.flipud(np.transpose(np.vstack([left_fitx + self.margin, ploty])))])
+        left_line_pts = np.hstack((left_line_window1, left_line_window2))
+
+        right_line_window1 = np.array([np.transpose(np.vstack([right_fitx - self.margin, ploty]))])
+        right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_fitx + self.margin, ploty])))])
+        right_line_pts = np.hstack((right_line_window1, right_line_window2))
+
+        cv2.fillPoly(window_img, np.int_([left_line_pts]), (0, 255, 0))
+        cv2.fillPoly(window_img, np.int_([right_line_pts]), (0, 255, 0))
+
+        return window_img
+
+    def update_fit(self, fit, image):
+        nonzero = image.nonzero()
+        nonzeroy, nonzerox = np.array(nonzero[0]), np.array(nonzero[1])
+
+        lane_indexes = ((nonzerox > (fit[0] * nonzeroy ** 2 + fit[1] * nonzeroy + fit[2] - self.margin)) & (
+            nonzerox < (fit[0] * nonzeroy ** 2 + fit[1] * nonzeroy + fit[2] + self.margin)))
+        x = nonzerox[lane_indexes]
+        y = nonzeroy[lane_indexes]
+
+        return np.polyfit(y, x, 2), lane_indexes
+
+    def refind_fit(self, image, current):
+        nonzero = image.nonzero()
+        nonzeroy, nonzerox = np.array(nonzero[0]), np.array(nonzero[1])
+
+        w_height = np.int(image.shape[0] / self.n_windows)
+        lane_indexes = []
+
+        for w in range(self.n_windows):
+            win_y_low, win_y_high = image.shape[0] - (w + 1) * w_height, image.shape[0] - w * w_height
+            win_x_low, win_x_high = current - self.margin, current + self.margin
+
+            good_indexes = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & (nonzerox >= win_x_low) & (
+                nonzerox < win_x_high)).nonzero()[0]
+            lane_indexes.append(good_indexes)
+
+            if len(good_indexes) >= self.min_pixels:
+                current = np.int(np.mean(nonzerox[good_indexes]))
+
+        lane_indexes = np.concatenate(lane_indexes)
+        x = nonzerox[lane_indexes]
+        y = nonzeroy[lane_indexes]
+
+        return np.polyfit(y, x, 2), lane_indexes
+
+    @staticmethod
+    def find_left_base(image):
+        histogram = np.sum(image[np.int(image.shape[0] / 2):, :], axis=0)
+        midpoint = np.int(histogram.shape[0] / 2)
+
+        left_base = np.argmax(histogram[:midpoint])
+        return left_base
+
+    @staticmethod
+    def find_right_base(image):
+        histogram = np.sum(image[np.int(image.shape[0] / 2):, :], axis=0)
+        midpoint = np.int(histogram.shape[0] / 2)
+
+        right_base = np.argmax(histogram[midpoint:]) + midpoint
+        return right_base
+
+
+class Pipeline(object):
+    def __init__(self):
+        self.distortion = Distortion((9, 6))
+        self.transformer = PerspectiveTransformer()
+        self.binary = ThresholdBinary()
+        self.finder = PolynomialFinder()
+        self.ym_per_pixel = 30 / 720
+        self.xm_per_pixel = 3.7 / 700
+
+    def calibrate_camera(self, images):
+        self.distortion.train(images)
+
+    def do(self, image):
+        undistorted = self.distortion.undistort(image)
+        binary = self.binary.combined_threshold(undistorted)
+        warped = self.transformer.transform(binary)
+        left_fit, right_fit = self.finder.find(warped)
+
+        ploty = np.linspace(0, image.shape[0] - 1, image.shape[0])
+        left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+        right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
+
+        warped_zero = np.zeros_like(warped).astype(np.uint8)
+        color_warp = np.dstack((warped_zero, warped_zero, warped_zero))
+
+        pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+        pts = np.hstack((pts_left, pts_right))
+        cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
+
+        newwarp = self.transformer.reverse_transform(color_warp)
+        result = cv2.addWeighted(undistorted, 1, newwarp, 0.3, 0)
+
+        y_eval = np.max(ploty)
+        left_fit_cr = np.polyfit(ploty * self.ym_per_pixel, left_fitx * self.xm_per_pixel, 2)
+        right_fit_cr = np.polyfit(ploty * self.ym_per_pixel, right_fitx * self.xm_per_pixel, 2)
+        left_curverad = ((1 + (
+            2 * left_fit_cr[0] * y_eval * self.ym_per_pixel + left_fit_cr[1]) ** 2) ** 1.5) / np.absolute(
+            2 * left_fit_cr[0])
+        right_curverad = ((1 + (
+            2 * right_fit_cr[0] * y_eval * self.ym_per_pixel + right_fit_cr[1]) ** 2) ** 1.5) / np.absolute(
+            2 * right_fit_cr[0])
+        cv2.putText(result, 'Radius of Curvature = ' + str(round((left_curverad + right_curverad) / 2, 3)) + '(m)',
+                    (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        return result
